@@ -2,11 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\SendMessagePageRequest;
 use App\Models\Message;
 use App\Services\InfobipSmsService;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\RedirectResponse;
-use Illuminate\Http\Request;
 use Illuminate\View\View;
 
 class MessagePageController extends Controller
@@ -29,14 +29,9 @@ class MessagePageController extends Controller
         ]);
     }
 
-    public function send(Request $request, InfobipSmsService $infobipSmsService): RedirectResponse
+    public function send(SendMessagePageRequest $request, InfobipSmsService $infobipSmsService): RedirectResponse
     {
-        $validated = $request->validate([
-            'from' => ['required', 'string', 'max:20'],
-            'to' => ['required', 'string', 'max:20'],
-            'message' => ['required', 'string', 'max:500'],
-            'media_url' => ['nullable', 'url', 'max:2048'],
-        ]);
+        $validated = $request->validated();
 
         $templateData = [
             'body' => [
@@ -44,12 +39,6 @@ class MessagePageController extends Controller
             ],
         ];
 
-        if (! empty($validated['media_url'])) {
-            $templateData['header'] = [
-                'type' => 'IMAGE',
-                'mediaUrl' => $validated['media_url'],
-            ];
-        }
 
         try {
             $infobipSmsService->sendTemplateMessage(

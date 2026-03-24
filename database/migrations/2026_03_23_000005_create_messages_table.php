@@ -20,7 +20,9 @@ return new class extends Migration
             $table->text('message_text');
             $table->enum('status', ['sent', 'delivered', 'received', 'failed'])->default('sent');
             $table->timestamp('sent_at')->useCurrent();
+            $table->string('provider_message_id', 50);
             $table->timestamp('received_at')->nullable();
+            $table->text('logs')->nullable();
             $table->timestamps();
         });
     }

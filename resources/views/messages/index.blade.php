@@ -50,13 +50,6 @@
                         </div>
 
                         <div class="md:col-span-3">
-                            <x-input-label for="media_url" :value="__('Header Image URL (optional)')" />
-                            <x-text-input id="media_url" name="media_url" type="url" class="mt-1 block w-full"
-                                :value="old('media_url')" />
-                            <x-input-error class="mt-2" :messages="$errors->get('media_url')" />
-                        </div>
-
-                        <div class="md:col-span-3">
                             <x-primary-button>Send</x-primary-button>
                         </div>
                     </form>
@@ -90,6 +83,7 @@
                                         <th class="text-left py-2 pr-4">To</th>
                                         <th class="text-left py-2 pr-4">Message</th>
                                         <th class="text-left py-2 pr-4">Status</th>
+                                        <th class="text-left py-2 pr-4">Logs</th>
                                         <th class="text-left py-2 pr-4">Time</th>
                                     </tr>
                                 </thead>
@@ -100,13 +94,25 @@
                                             <td class="py-2 pr-4">{{ $message->toNumber?->number }}</td>
                                             <td class="py-2 pr-4">{{ $message->message_text }}</td>
                                             <td class="py-2 pr-4">{{ strtoupper($message->status) }}</td>
+                                            <td class="py-2 pr-4 max-w-xs">
+                                                @php
+                                                    $outgoingLogs = is_string($message->logs) ? json_decode($message->logs, true) : null;
+                                                @endphp
+                                                <div class="max-h-28 overflow-auto whitespace-pre-wrap break-words text-xs text-gray-700 dark:text-gray-300">
+                                                    @if (is_array($outgoingLogs))
+                                                        {{ json_encode($outgoingLogs, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}
+                                                    @else
+                                                        {{ $message->logs ?? 'N/A' }}
+                                                    @endif
+                                                </div>
+                                            </td>
                                             <td class="py-2 pr-4">
                                                 {{ optional($message->sent_at ?? $message->created_at)->format('Y-m-d H:i:s') }}
                                             </td>
                                         </tr>
                                     @empty
                                         <tr>
-                                            <td colspan="5" class="py-4 text-gray-500">No outgoing messages yet.</td>
+                                            <td colspan="6" class="py-4 text-gray-500">No outgoing messages yet.</td>
                                         </tr>
                                     @endforelse
                                 </tbody>
@@ -124,6 +130,7 @@
                                         <th class="text-left py-2 pr-4">To</th>
                                         <th class="text-left py-2 pr-4">Message</th>
                                         <th class="text-left py-2 pr-4">Status</th>
+                                        <th class="text-left py-2 pr-4">Logs</th>
                                         <th class="text-left py-2 pr-4">Time</th>
                                     </tr>
                                 </thead>
@@ -134,13 +141,25 @@
                                             <td class="py-2 pr-4">{{ $message->toNumber?->number }}</td>
                                             <td class="py-2 pr-4">{{ $message->message_text }}</td>
                                             <td class="py-2 pr-4">{{ strtoupper($message->status) }}</td>
+                                            <td class="py-2 pr-4 max-w-xs">
+                                                @php
+                                                    $incomingLogs = is_string($message->logs) ? json_decode($message->logs, true) : null;
+                                                @endphp
+                                                <div class="max-h-28 overflow-auto whitespace-pre-wrap break-words text-xs text-gray-700 dark:text-gray-300">
+                                                    @if (is_array($incomingLogs))
+                                                        {{ json_encode($incomingLogs, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}
+                                                    @else
+                                                        {{ $message->logs ?? 'N/A' }}
+                                                    @endif
+                                                </div>
+                                            </td>
                                             <td class="py-2 pr-4">
                                                 {{ optional($message->received_at ?? $message->created_at)->format('Y-m-d H:i:s') }}
                                             </td>
                                         </tr>
                                     @empty
                                         <tr>
-                                            <td colspan="5" class="py-4 text-gray-500">No incoming messages yet.</td>
+                                            <td colspan="6" class="py-4 text-gray-500">No incoming messages yet.</td>
                                         </tr>
                                     @endforelse
                                 </tbody>

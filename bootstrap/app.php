@@ -13,11 +13,8 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
-    ->withMiddleware(function (Middleware $middleware): void {
-        // Use app CSRF middleware so $except in VerifyCsrfToken applies (e.g. external webhooks).
-        $middleware->web(replace: [
-            FrameworkValidateCsrfToken::class => VerifyCsrfToken::class,
-        ]);
+    ->withMiddleware(function ($middleware) {
+        //
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

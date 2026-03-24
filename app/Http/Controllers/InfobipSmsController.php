@@ -2,31 +2,25 @@
 
 namespace App\Http\Controllers;
 
+use App\DTOs\ApiResponseDto;
+use App\Http\Requests\InfobipSendMessageRequest;
 use App\Services\InfobipSmsService;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Validation\ValidationException;
 
 class InfobipSmsController extends Controller
 {
 
-    public function send(Request $request, InfobipSmsService $service): JsonResponse
+    public function send(InfobipSendMessageRequest $request, InfobipSmsService $service): JsonResponse
     {
-        $payload = $request->all();
+        $request->validated();
 
-        if (isset($payload['messages'][0]) && is_array($payload['messages'][0])) {
-            $message = $payload['messages'][0];
+        if ($request->hasStructuredPayload()) {
+            $message = $request->structuredMessage();
             $from = (string) ($message['from'] ?? '');
             $to = (string) ($message['to'] ?? '');
             $content = is_array($message['content'] ?? null) ? $message['content'] : [];
-
-            if ($from === '' || $to === '') {
-                return response()->json([
-                    'message' => 'Validation error.',
-                    'error' => 'messages.0.from and messages.0.to are required.',
-                ], 422);
-            }
 
             try {
                 if (isset($content['text'])) {
@@ -59,10 +53,12 @@ class InfobipSmsController extends Controller
                     }
 
                     if ($templateName === '') {
-                        return response()->json([
-                            'message' => 'Validation error.',
-                            'error' => 'messages.0.content.templateName is required for template sends.',
-                        ], 422);
+                        $dto = ApiResponseDto::error(
+                            'Validation error.',
+                            'messages.0.content.templateName is required for template sends.'
+                        );
+
+                        return response()->json($dto->toArray(), 422);
                     }
 
                     $response = $service->sendTemplateMessage(
@@ -75,23 +71,20 @@ class InfobipSmsController extends Controller
                     );
                 }
             } catch (RequestException $exception) {
-                return response()->json([
-                    'message' => 'Failed to send WhatsApp message.',
-                    'error' => $exception->response?->json() ?? $exception->getMessage(),
-                ], 502);
+                $dto = ApiResponseDto::error(
+                    'Failed to send WhatsApp message.',
+                    $exception->response?->json() ?? $exception->getMessage()
+                );
+
+                return response()->json($dto->toArray(), 502);
             }
 
-            return response()->json([
-                'message' => 'Message sent successfully.',
-                'data' => $response,
-            ]);
+            $dto = ApiResponseDto::success('Message sent successfully.', $response);
+
+            return response()->json($dto->toArray());
         }
 
-        $validated = $request->validate([
-            'from' => ['required', 'string', 'max:20'],
-            'to' => ['required', 'string', 'max:20'],
-            'message' => ['required', 'string', 'max:500'],
-        ]);
+        $validated = $request->simplePayload();
 
         try {
             $response = $service->sendTextMessage(
@@ -100,24 +93,25 @@ class InfobipSmsController extends Controller
                 $validated['message']
             );
         } catch (RequestException $exception) {
-            return response()->json([
-                'message' => 'Failed to send WhatsApp text message.',
-                'error' => $exception->response?->json() ?? $exception->getMessage(),
-            ], 502);
+            $dto = ApiResponseDto::error(
+                'Failed to send WhatsApp text message.',
+                $exception->response?->json() ?? $exception->getMessage()
+            );
+
+            return response()->json($dto->toArray(), 502);
         }
 
-        return response()->json([
-            'message' => 'Message sent successfully.',
-            'data' => $response,
-        ]);
+        $dto = ApiResponseDto::success('Message sent successfully.', $response);
+
+        return response()->json($dto->toArray());
     }
 
     public function receive(Request $request, InfobipSmsService $service): JsonResponse
     {
         $service->handleIncomingWebhook($request->all());
 
-        return response()->json([
-            'message' => 'Webhook payload processed.',
-        ]);
+        $dto = ApiResponseDto::success('Webhook payload processed.');
+
+        return response()->json($dto->toArray());
     }
 }

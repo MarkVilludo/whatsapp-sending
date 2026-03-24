@@ -24,6 +24,8 @@ class Message extends Model
         'status',
         'sent_at',
         'received_at',
+        'provider_message_id',
+        'logs'
     ];
 
     /**
