@@ -1,0 +1,76 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Message;
+use App\Services\InfobipSmsService;
+use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\View\View;
+
+class MessagePageController extends Controller
+{
+    public function index(): View
+    {
+        $incomingMessages = Message::with(['fromNumber', 'toNumber', 'provider'])
+            ->where('direction', 'incoming')
+            ->latest()
+            ->get();
+
+        $outgoingMessages = Message::with(['fromNumber', 'toNumber', 'provider'])
+            ->where('direction', 'outgoing')
+            ->latest()
+            ->get();
+
+        return view('messages.index', [
+            'incomingMessages' => $incomingMessages,
+            'outgoingMessages' => $outgoingMessages,
+        ]);
+    }
+
+    public function send(Request $request, InfobipSmsService $infobipSmsService): RedirectResponse
+    {
+        $validated = $request->validate([
+            'from' => ['required', 'string', 'max:20'],
+            'to' => ['required', 'string', 'max:20'],
+            'message' => ['required', 'string', 'max:500'],
+            'media_url' => ['nullable', 'url', 'max:2048'],
+        ]);
+
+        $templateData = [
+            'body' => [
+                'placeholders' => [$validated['message']],
+            ],
+        ];
+
+        if (! empty($validated['media_url'])) {
+            $templateData['header'] = [
+                'type' => 'IMAGE',
+                'mediaUrl' => $validated['media_url'],
+            ];
+        }
+
+        try {
+            $infobipSmsService->sendTemplateMessage(
+                $validated['from'],
+                $validated['to'],
+                'whatsapp_docs_quick_access',
+                [$validated['message']],
+                'en',
+                $templateData
+            );
+        } catch (RequestException $exception) {
+            return back()
+                ->withInput()
+                ->withErrors([
+                    'send' => $exception->response?->json()['requestError']['serviceException']['text']
+                        ?? 'Failed to send message via Infobip.',
+                ]);
+        }
+
+        return redirect()
+            ->route('messages.index')
+            ->with('status', 'Message request submitted to Infobip.');
+    }
+}
