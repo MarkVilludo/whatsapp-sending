@@ -84,6 +84,51 @@ class InfobipSmsController extends Controller
             return response()->json($dto->toArray());
         }
 
+        if ($request->hasFlatContentPayload()) {
+            $from = (string) $request->input('from', '');
+            $to = (string) $request->input('to', '');
+            $content = $request->flatContentPayload();
+
+            try {
+                if (($content['type'] ?? null) === 'text' || isset($content['text'])) {
+                    $response = $service->sendTextMessage(
+                        $from,
+                        $to,
+                        (string) ($content['text'] ?? '')
+                    );
+                } else {
+                    $templateName = (string) ($content['templateName'] ?? ($content['templateId'] ?? ''));
+                    $language = (string) ($content['language'] ?? 'en');
+                    $templateData = is_array($content['templateData'] ?? null) ? $content['templateData'] : null;
+
+                    $placeholders = [];
+                    if (isset($templateData['body']['placeholders']) && is_array($templateData['body']['placeholders'])) {
+                        $placeholders = array_values(array_map('strval', $templateData['body']['placeholders']));
+                    }
+
+                    $response = $service->sendTemplateMessage(
+                        $from,
+                        $to,
+                        $templateName,
+                        $placeholders,
+                        $language,
+                        $templateData
+                    );
+                }
+            } catch (RequestException $exception) {
+                $dto = ApiResponseDto::error(
+                    'Failed to send WhatsApp message.',
+                    $exception->response?->json() ?? $exception->getMessage()
+                );
+
+                return response()->json($dto->toArray(), 502);
+            }
+
+            $dto = ApiResponseDto::success('Message sent successfully.', $response);
+
+            return response()->json($dto->toArray());
+        }
+
         $validated = $request->simplePayload();
 
         try {

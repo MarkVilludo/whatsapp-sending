@@ -30,6 +30,15 @@ class InfobipSendMessageRequest extends FormRequest
             return;
         }
 
+        if ($this->hasFlatContentPayload()) {
+            $this->merge([
+                'from' => $this->normalizePhone((string) $this->input('from', '')),
+                'to' => $this->normalizePhone((string) $this->input('to', '')),
+            ]);
+
+            return;
+        }
+
         $this->merge([
             'from' => $this->normalizePhone((string) $this->input('from', '')),
             'to' => $this->normalizePhone((string) $this->input('to', '')),
@@ -47,6 +56,7 @@ class InfobipSendMessageRequest extends FormRequest
             'messages.0.from' => ['sometimes', 'string', 'max:20', 'regex:'.self::E164_REGEX],
             'messages.0.to' => ['sometimes', 'string', 'max:20', 'regex:'.self::E164_REGEX],
             'messages.0.content' => ['sometimes', 'array'],
+            'content' => ['sometimes', 'array'],
             'from' => ['sometimes', 'string', 'max:20', 'regex:'.self::E164_REGEX],
             'to' => ['sometimes', 'string', 'max:20', 'regex:'.self::E164_REGEX],
             'message' => ['sometimes', 'string', 'max:500'],
@@ -79,6 +89,23 @@ class InfobipSendMessageRequest extends FormRequest
                 return;
             }
 
+            if ($this->hasFlatContentPayload()) {
+                $content = $this->flatContentPayload();
+
+                if (($this->input('from') ?? '') === '' || ($this->input('to') ?? '') === '') {
+                    $validator->errors()->add('content', 'from and to are required.');
+                }
+
+                $isText = isset($content['text']) && (string) $content['text'] !== '';
+                $isTemplate = isset($content['templateName']) || isset($content['templateId']);
+
+                if (! $isText && ! $isTemplate) {
+                    $validator->errors()->add('content', 'content.text or content.templateName is required.');
+                }
+
+                return;
+            }
+
             if (($this->input('from') ?? '') === '' || ($this->input('to') ?? '') === '' || ($this->input('message') ?? '') === '') {
                 $validator->errors()->add('message', 'from, to, and message are required.');
             }
@@ -100,6 +127,21 @@ class InfobipSendMessageRequest extends FormRequest
         $message = $this->input('messages.0', []);
 
         return is_array($message) ? $message : [];
+    }
+
+    public function hasFlatContentPayload(): bool
+    {
+        return is_array($this->input('content'));
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function flatContentPayload(): array
+    {
+        $content = $this->input('content', []);
+
+        return is_array($content) ? $content : [];
     }
 
     /**

@@ -6,17 +6,12 @@ use App\Models\Message;
 use App\Models\PhoneNumber;
 use App\Models\Provider;
 use Illuminate\Http\Client\RequestException;
-use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class InfobipSmsService
 {
-    private const STATUS_SENT = 'sent';
-    private const STATUS_DELIVERED = 'delivered';
-    private const STATUS_RECEIVED = 'received';
-    private const STATUS_FAILED = 'failed';
-
     public function sendTextMessage(string $from, string $to, string $text): array
     {
         $provider = Provider::firstOrCreate(
@@ -56,21 +51,16 @@ class InfobipSmsService
                 'Content-Type' => 'application/json',
             ])->post($endpoint, $payload)->throw();
         } catch (RequestException $exception) {
-            $errorBody = $exception->response?->json() ?? $exception->response?->body();
-
             Message::create([
                 'from_number_id' => $fromNumber->id,
                 'to_number_id' => $toNumber->id,
                 'provider_id' => $provider->id,
                 'direction' => 'outgoing',
                 'message_text' => $text,
-                'status' => self::STATUS_FAILED,
+                'status' => 'failed',
                 'sent_at' => now(),
-                'provider_message_id' => 'error-'.(string) now()->timestamp.'-'.substr((string) md5($from.$to.$text), 0, 10),
-                'logs' => $this->encodeLogs([
-                    'request' => $payload,
-                    'error' => $errorBody,
-                ]),
+                'provider_message_id' => (string) Str::uuid(),
+                'logs' => $exception->response?->body(),
             ]);
 
             Log::error('Infobip Error: '.$exception->response?->body());
@@ -78,11 +68,9 @@ class InfobipSmsService
         }
 
         $responseBody = $response->json() ?? [];
-        $messageResult = Arr::get($responseBody, 'messages.0', []);
-        $status = $this->normalizeStatusFromResponse($messageResult, 'outgoing');
-        $messageId = (string) (Arr::get($messageResult, 'messageId') ?? ('outgoing-'.(string) now()->timestamp.'-'.substr((string) md5($from.$to.$text), 0, 10)));
-
-        Log::info('Infobip Response', ['response' => $responseBody]);
+        $firstResult = is_array($responseBody['messages'][0] ?? null) ? $responseBody['messages'][0] : [];
+        $providerMessageId = (string) ($responseBody['messages'][0]['messageId'] ?? Str::uuid());
+        $resolvedStatus = $this->mapWebhookStatusToLocal($firstResult) ?? 'sent';
 
         Message::create([
             'from_number_id' => $fromNumber->id,
@@ -90,13 +78,10 @@ class InfobipSmsService
             'provider_id' => $provider->id,
             'direction' => 'outgoing',
             'message_text' => $text,
-            'status' => $status,
-            'provider_message_id' => $messageId,
-            'logs' => $this->encodeLogs([
-                'request' => $payload,
-                'response' => $responseBody,
-            ]),
+            'status' => $resolvedStatus,
             'sent_at' => now(),
+            'provider_message_id' => $providerMessageId,
+            'logs' => json_encode($responseBody),
         ]);
 
         return $responseBody;
@@ -109,56 +94,67 @@ class InfobipSmsService
             ['type' => 'whatsapp']
         );
 
-        $results = $payload['results'] ?? [];
+        $results = $this->extractWebhookResults($payload);
 
         foreach ($results as $result) {
-            $from = (string) ($result['from'] ?? '');
             $to = (string) ($result['to'] ?? '');
-            $messageObj = $result['message'] ?? [];
-            $text = (string) ($messageObj['text'] ?? '');
-            $messageId = (string) ($result['messageId'] ?? '');
-            $normalizedStatus = $this->normalizeStatusFromResponse($result, 'incoming');
-            $encodedLogs = $this->encodeLogs([
-                'webhook' => $payload,
-                'result' => $result,
-            ]);
+            $from = (string) ($result['from'] ?? '');
+            $text = $this->extractIncomingText($result);
+            $providerMessageId = (string) ($result['messageId'] ?? '');
+            $webhookStatus = $this->mapWebhookStatusToLocal($result);
 
-            $outgoingStatusReport = $messageId !== '' && isset($result['status']) && $text === '';
-            if ($outgoingStatusReport) {
-                $existing = Message::query()
-                    ->where('provider_message_id', $messageId)
-                    ->first();
+            if ($to !== '' && $webhookStatus !== null && ($from === '' || $text === '')) {
+                $latestOutgoing = null;
 
-                if ($existing !== null) {
-                    $existing->update([
-                        'status' => $normalizedStatus,
-                        'logs' => $encodedLogs,
-                    ]);
-                } else {
-                    if ($from === '' || $to === '') {
-                        continue;
+                if ($providerMessageId !== '') {
+                    $latestOutgoing = Message::query()
+                        ->where('provider_id', $provider->id)
+                        ->where('direction', 'outgoing')
+                        ->where('provider_message_id', $providerMessageId)
+                        ->latest()
+                        ->first();
+                }
+
+                if ($latestOutgoing === null) {
+                    $latestOutgoing = Message::query()
+                        ->where('provider_id', $provider->id)
+                        ->where('direction', 'outgoing')
+                        ->whereHas('toNumber', fn ($query) => $query->where('number', $to))
+                        ->latest()
+                        ->first();
+                }
+
+                if ($latestOutgoing !== null) {
+                    $latestOutgoing->status = $webhookStatus;
+
+                    if ($webhookStatus === 'delivered') {
+                        $latestOutgoing->received_at = now();
                     }
 
-                    $fromNumber = PhoneNumber::firstOrCreate(
-                        ['number' => $from],
-                        ['provider_id' => $provider->id]
-                    );
+                    if ($providerMessageId !== '') {
+                        $latestOutgoing->provider_message_id = $providerMessageId;
+                    }
 
+                    $latestOutgoing->logs = json_encode($result);
+
+                    $latestOutgoing->save();
+                } else {
+                    // If send response was not persisted for any reason, keep webhook status in DB.
                     $toNumber = PhoneNumber::firstOrCreate(
                         ['number' => $to],
                         ['provider_id' => $provider->id]
                     );
 
                     Message::create([
-                        'from_number_id' => $fromNumber->id,
+                        'from_number_id' => $toNumber->id,
                         'to_number_id' => $toNumber->id,
                         'provider_id' => $provider->id,
                         'direction' => 'outgoing',
-                        'message_text' => '[STATUS REPORT]',
-                        'status' => $normalizedStatus,
-                        'provider_message_id' => $messageId,
-                        'logs' => $encodedLogs,
+                        'message_text' => '[WEBHOOK STATUS UPDATE] '.$webhookStatus,
+                        'status' => $webhookStatus,
                         'sent_at' => now(),
+                        'provider_message_id' => $providerMessageId !== '' ? $providerMessageId : (string) Str::uuid(),
+                        'logs' => json_encode($result),
                     ]);
                 }
 
@@ -185,12 +181,94 @@ class InfobipSmsService
                 'provider_id' => $provider->id,
                 'direction' => 'incoming',
                 'message_text' => $text,
-                'status' => self::STATUS_RECEIVED,
-                'provider_message_id' => $messageId !== '' ? $messageId : 'incoming-'.(string) now()->timestamp.'-'.substr((string) md5($from.$to.$text), 0, 10),
-                'logs' => $encodedLogs,
+                'status' => 'received',
                 'received_at' => now(),
+                'provider_message_id' => (string) ($result['messageId'] ?? Str::uuid()),
+                'logs' => json_encode($result),
             ]);
         }
+    }
+
+    private function extractIncomingText(array $result): string
+    {
+        $directText = (string) ($result['text'] ?? '');
+        if ($directText !== '') {
+            return $directText;
+        }
+
+        $messageText = (string) ($result['message']['text'] ?? '');
+        if ($messageText !== '') {
+            return $messageText;
+        }
+
+        $contentText = (string) ($result['content']['text'] ?? '');
+        if ($contentText !== '') {
+            return $contentText;
+        }
+
+        $interactiveTitle = (string) ($result['message']['interactive']['buttonReply']['title'] ?? '');
+        if ($interactiveTitle !== '') {
+            return $interactiveTitle;
+        }
+
+        $interactiveListTitle = (string) ($result['message']['interactive']['listReply']['title'] ?? '');
+        if ($interactiveListTitle !== '') {
+            return $interactiveListTitle;
+        }
+
+        $caption = (string) ($result['message']['image']['caption'] ?? '');
+        if ($caption !== '') {
+            return $caption;
+        }
+
+        return '';
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function extractWebhookResults(array $payload): array
+    {
+        $results = $payload['results'] ?? null;
+        if (is_array($results)) {
+            return $results;
+        }
+
+        $webhookResults = $payload['webhook']['results'] ?? null;
+        if (is_array($webhookResults)) {
+            return $webhookResults;
+        }
+
+        $singleResult = $payload['result'] ?? null;
+        if (is_array($singleResult)) {
+            return [$singleResult];
+        }
+
+        return [];
+    }
+
+    private function mapWebhookStatusToLocal(array $result): ?string
+    {
+        $groupName = strtoupper((string) ($result['status']['groupName'] ?? ''));
+        $name = strtoupper((string) ($result['status']['name'] ?? ''));
+
+        if ($groupName === '' && $name === '') {
+            return null;
+        }
+
+        if ($groupName === 'DELIVERED' || str_contains($name, 'DELIVERED')) {
+            return 'delivered';
+        }
+
+        if ($groupName === 'UNDELIVERABLE' || str_contains($name, 'REJECTED') || str_contains($name, 'FAILED')) {
+            return 'failed';
+        }
+
+        if ($groupName === 'RECEIVED') {
+            return 'received';
+        }
+
+        return 'sent';
     }
 
     public function sendTemplateMessage(
@@ -225,6 +303,13 @@ class InfobipSmsService
             ],
         ];
 
+        if (isset($resolvedTemplateData['header']) && is_array($resolvedTemplateData['header'])) {
+            $mediaUrl = $resolvedTemplateData['header']['mediaUrl'] ?? null;
+            if (! is_string($mediaUrl) || filter_var($mediaUrl, FILTER_VALIDATE_URL) === false) {
+                unset($resolvedTemplateData['header']);
+            }
+        }
+
         $payload = [
             'messages' => [
                 [
@@ -244,97 +329,46 @@ class InfobipSmsService
                 'Authorization' => 'App '.$apiKey,
                 'Accept' => 'application/json',
                 'Content-Type' => 'application/json',
-            ])
-            ->withoutVerifying() 
-            ->post($endpoint, $payload)
-            ->throw();
-
+            ])->post($endpoint, $payload)->throw();
         } catch (RequestException $exception) {
-            $errorBody = $exception->response?->body();
-            Log::error("Infobip API Error for $from: " . $errorBody);
-
             Message::create([
                 'from_number_id' => $fromNumber->id,
                 'to_number_id' => $toNumber->id,
                 'provider_id' => $provider->id,
                 'direction' => 'outgoing',
                 'message_text' => '[TEMPLATE: '.$templateName.'] '.implode(' | ', $placeholders),
-                'status' => self::STATUS_FAILED,
-                'provider_message_id' => 'error-'.(string) now()->timestamp.'-'.substr((string) md5($from.$to.$templateName), 0, 10),
-                'logs' => $this->encodeLogs([
-                    'request' => $payload,
-                    'error' => $exception->response?->json() ?? $errorBody,
-                ]),
+                'status' => 'failed',
                 'sent_at' => now(),
+                'provider_message_id' => (string) Str::uuid(),
+                'logs' => $exception->response?->body(),
             ]);
 
+            Log::error('Infobip Error: '.$exception->response?->body());
             throw $exception;
         }
 
-        $responseData = $response->json() ?? [];
+        $responseBody = $response->json() ?? [];
+        $firstResult = is_array($responseBody['messages'][0] ?? null) ? $responseBody['messages'][0] : [];
+        $providerMessageId = (string) ($responseBody['messages'][0]['messageId'] ?? Str::uuid());
+        $resolvedStatus = $this->mapWebhookStatusToLocal($firstResult) ?? 'sent';
 
-        $messageResult = $responseData['messages'][0] ?? [];
+        Message::create([
+            'from_number_id' => $fromNumber->id,
+            'to_number_id' => $toNumber->id,
+            'provider_id' => $provider->id,
+            'direction' => 'outgoing',
+            'message_text' => '[TEMPLATE: '.$templateName.'] '.implode(' | ', $placeholders),
+            'status' => $resolvedStatus,
+            'sent_at' => now(),
+            'provider_message_id' => $providerMessageId,
+            'logs' => json_encode($responseBody),
+        ]);
 
-        if ($messageResult) {
-            $externalId = (string) ($messageResult['messageId'] ?? ('outgoing-'.(string) now()->timestamp.'-'.substr((string) md5($from.$to.$templateName), 0, 10)));
-            $normalizedStatus = $this->normalizeStatusFromResponse($messageResult, 'outgoing');
-
-            Message::create([
-                'from_number_id' => $fromNumber->id,
-                'to_number_id'   => $toNumber->id,
-                'provider_id'    => $provider->id,
-                'direction'      => 'outgoing',
-                'message_text'   => '[TEMPLATE: '.$templateName.'] '.implode(' | ', $placeholders),
-                'status'         => $normalizedStatus,
-                'sent_at'        => now(),
-                'provider_message_id' => $externalId,
-                'logs' => $this->encodeLogs([
-                    'request' => $payload,
-                    'response' => $responseData,
-                ]),
-            ]);
-        }
-
-        return $responseData ?? [];
+        return $responseBody;
     }
 
     public function sendSms(string $from, string $to, string $text): array
     {
         return $this->sendTextMessage($from, $to, $text);
-    }
-
-    private function normalizeStatusFromResponse(array $result, string $direction): string
-    {
-        $groupId = strtoupper((string) Arr::get($result, 'status.groupId', ''));
-        $name = strtoupper((string) Arr::get($result, 'status.name', ''));
-        $description = strtoupper((string) Arr::get($result, 'status.description', ''));
-        $reason = strtoupper((string) Arr::get($result, 'reason', ''));
-
-        $failedMarkers = ['REJECTED', 'FAILED', 'UNDELIVERABLE', 'ERROR'];
-        foreach ($failedMarkers as $marker) {
-            if (
-                str_contains($groupId, $marker) ||
-                str_contains($name, $marker) ||
-                str_contains($description, $marker) ||
-                str_contains($reason, $marker)
-            ) {
-                return self::STATUS_FAILED;
-            }
-        }
-
-        if (in_array($groupId, ['DELIVERED', 'DELIVERED_TO_HANDSET'], true)) {
-            return self::STATUS_DELIVERED;
-        }
-
-        if (in_array($groupId, ['PENDING', 'ACCEPTED'], true)) {
-            return self::STATUS_SENT;
-        }
-
-        return $direction === 'incoming' ? self::STATUS_RECEIVED : self::STATUS_SENT;
-    }
-
-    private function encodeLogs(array $data): string
-    {
-        return (string) json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     }
 }
